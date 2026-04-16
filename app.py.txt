@@ -1,0 +1,71 @@
+import streamlit as st
+import FinanceDataReader as fdr
+import pandas_ta as ta
+import pandas as pd
+
+# 1. 페이지 레이아웃 및 제목
+st.set_page_config(page_title="종가 베팅 스캐너", layout="wide")
+st.title("🛡️ 종가 베팅 전략 실시간 대시보드")
+st.markdown("---")
+
+# 2. 분석 로직 함수 (A~M 조건 반영)
+@st.cache_data(ttl=3600) # 1시간 동안 데이터 캐싱하여 속도 향상
+def get_scanning_results():
+    # 코스피/코스닥 상위 거래대금 종목 위주로 샘플링 (전체 스캔 시 속도 고려)
+    df_krx = fdr.StockListing('KRX')
+    target_stocks = df_krx.head(200) # 예시로 상위 200개 종목 분석
+    
+    final_list = []
+    
+    for _, row in target_stocks.iterrows():
+        code, name = row['Code'], row['Name']
+        try:
+            df = fdr.DataReader(code).tail(250) # 1년치 데이터
+            if len(df) < 240: continue
+            
+            # 기술적 지표 계산
+            df['MA20'] = ta.sma(df['Close'], length=20)
+            df['MA240'] = ta.sma(df['Close'], length=240)
+            df['RSI'] = ta.rsi(df['Close'], length=14)
+            df['Value'] = df['Close'] * df['Volume'] / 1_000_000 # 백만 단위
+
+            curr, prev = df.iloc[-1], df.iloc[-2]
+            last_5 = df.iloc[-5:]
+            last_20 = df.iloc[-20:]
+
+            # --- 조건 검증 (선생님의 파일 로직) ---
+            c_A_I = 0 <= ((curr['Open'] - prev['Close']) / prev['Close'] * 100) <= 5.0 # 갭 수정 반영
+            c_D = curr['High'] > prev['High'] # 고가 돌파
+            c_E = curr['Volume'] == last_5['Volume'].max() # 5봉 중 신고 거래량
+            c_F = curr['Close'] > curr['Open'] # 양봉
+            c_G = curr['Close'] == last_5['Close'].max() # 5봉 중 최고 종가
+            c_J = last_20['Value'].max() >= 30000 # 20봉 내 300억 이상 유입
+            c_K_L = curr['Close'] >= curr['MA20'] and curr['Close'] >= curr['MA240'] # 이평선 위
+            c_RSI = 50 <= curr['RSI'] <= 60 # 우리가 추가한 필터
+
+            if all([c_A_I, c_D, c_E, c_F, c_G, c_J, c_K_L, c_RSI]):
+                final_list.append({
+                    "종목명": name,
+                    "현재가": f"{int(curr['Close']):,}원",
+                    "RSI": round(curr['RSI'], 1),
+                    "거래대금(억)": int(curr['Value']/100),
+                    "시가갭": f"{((curr['Open'] - prev['Close']) / prev['Close'] * 100):.2f}%"
+                })
+        except:
+            continue
+    return pd.DataFrame(final_list)
+
+# 3. 메인 화면 구성
+col1, col2 = st.columns([1, 4])
+with col1:
+    if st.button("🚀 종목 스캔 시작"):
+        results = get_scanning_results()
+        st.session_state['results'] = results
+with col2:
+    st.write("장 마감 전(15:10~15:20) 버튼을 눌러 조건에 부합하는 종목을 확인하세요.")
+
+if 'results' in st.session_state and not st.session_state['results'].empty:
+    st.dataframe(st.session_state['results'], use_container_width=True)
+    st.success(f"현재 {len(st.session_state['results'])}개의 종목이 포착되었습니다.")
+elif 'results' in st.session_state:
+    st.warning("조건에 맞는 종목이 없습니다. 시장 상황을 다시 확인해 보세요.")
